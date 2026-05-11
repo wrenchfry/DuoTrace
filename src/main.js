@@ -102,9 +102,15 @@ const region = document.querySelector('#region');
 const regionLabel = document.querySelector('#regionLabel');
 const apiKey = document.querySelector('#apiKey');
 
-region.addEventListener('change', () => {
+updateRegionLabel();
+
+window.addEventListener('pageshow', updateRegionLabel);
+
+region.addEventListener('change', updateRegionLabel);
+
+function updateRegionLabel() {
   regionLabel.textContent = `Routing: ${titleCase(region.value)}`;
-});
+}
 
 clearButton.addEventListener('click', () => {
   resultList.innerHTML = '';
