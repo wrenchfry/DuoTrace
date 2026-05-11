@@ -63,11 +63,11 @@ document.querySelector('#app').innerHTML = `
         <div class="form-grid">
           <label>
             <span>First Riot ID</span>
-            <input id="playerOne" autocomplete="off" spellcheck="false" placeholder="Freyja#pink" required />
+            <input id="playerOne" autocomplete="off" spellcheck="false" placeholder="GameName#TAG" required />
           </label>
           <label>
             <span>Second Riot ID</span>
-            <input id="playerTwo" autocomplete="off" spellcheck="false" placeholder="wrenchfry#ekko" required />
+            <input id="playerTwo" autocomplete="off" spellcheck="false" placeholder="SecondName#TAG" required />
           </label>
           <label>
             <span>Routing region</span>
