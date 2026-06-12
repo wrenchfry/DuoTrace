@@ -106,6 +106,14 @@ updateRegionLabel();
 
 window.addEventListener('pageshow', updateRegionLabel);
 
+apiKey.addEventListener('input', () => {
+  const normalized = normalizeApiKey(apiKey.value);
+
+  if (apiKey.value !== normalized) {
+    apiKey.value = normalized;
+  }
+});
+
 region.addEventListener('change', updateRegionLabel);
 
 function updateRegionLabel() {
@@ -158,12 +166,25 @@ form.addEventListener('submit', async (event) => {
 });
 
 function getLookupInput() {
+  const normalizedApiKey = normalizeApiKey(apiKey.value);
+  apiKey.value = normalizedApiKey;
+
+  if (!/^RGAPI-[0-9a-f-]{36}$/i.test(normalizedApiKey)) {
+    throw new Error('Use the full Riot development key format: RGAPI-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.');
+  }
+
   return {
-    apiKey: apiKey.value.trim(),
+    apiKey: normalizedApiKey,
     first: parseRiotId(document.querySelector('#playerOne').value),
     second: parseRiotId(document.querySelector('#playerTwo').value),
     region: region.value
   };
+}
+
+function normalizeApiKey(value) {
+  return value
+    .replace(/[\s\u200B-\u200D\uFEFF]/g, '')
+    .trim();
 }
 
 function parseRiotId(value) {
@@ -190,6 +211,11 @@ function createRiotClient(input) {
     if (!response.ok) {
       const detail = await safeJson(response);
       const status = detail?.status?.message || response.statusText;
+
+      if (response.status === 401 && status.toLowerCase().includes('apikey')) {
+        throw new Error('Riot did not accept that API key. Paste a fresh RGAPI key from the Riot developer portal; development keys expire and stop working even when the format looks correct.');
+      }
+
       throw new Error(`Riot API returned ${response.status}: ${status}`);
     }
 
