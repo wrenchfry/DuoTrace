@@ -2,6 +2,12 @@ import './styles.css';
 
 const regions = ['americas', 'europe', 'asia', 'sea'];
 const batchSize = 100;
+const requestDelayMs = 1300;
+const fallbackRateLimitSeconds = 120;
+const matchCachePrefix = 'duotrace:match:v1:';
+
+let nextRequestAt = 0;
+let requestQueue = Promise.resolve();
 
 const queueNames = new Map([
   [400, 'Draft Pick'],
@@ -140,19 +146,11 @@ form.addEventListener('submit', async (event) => {
       client.account(input.second)
     ]);
 
-    const sharedIds = await findSharedMatchIds(client, firstAccount.puuid, secondAccount.puuid);
+    const matches = await findSharedMatches(client, firstAccount.puuid, secondAccount.puuid);
 
-    if (!sharedIds.length) {
+    if (!matches.length) {
       setMessage('No shared matches found in the available match history for both players.');
       return;
-    }
-
-    const matches = [];
-
-    for (const [index, id] of sharedIds.entries()) {
-      setMessage(`Loading shared match ${index + 1} of ${sharedIds.length}.`);
-      const match = await client.match(id);
-      matches.push(formatMatch(match, firstAccount.puuid, secondAccount.puuid));
     }
 
     renderResults(matches);
@@ -225,27 +223,113 @@ function createRiotClient(input) {
   return {
     account: ({ gameName, tagLine }) => request(`/riot/account/v1/accounts/by-riot-id/${encodeURIComponent(gameName)}/${encodeURIComponent(tagLine)}`),
     matchIds: (puuid, start) => request(`/lol/match/v5/matches/by-puuid/${encodeURIComponent(puuid)}/ids?start=${start}&count=${batchSize}`),
-    match: (matchId) => request(`/lol/match/v5/matches/${encodeURIComponent(matchId)}`)
+    match: async (matchId) => {
+      const cached = readCachedMatch(input.region, matchId);
+
+      if (cached) {
+        return cached;
+      }
+
+      const match = normalizeMatch(await request(`/lol/match/v5/matches/${encodeURIComponent(matchId)}`));
+      writeCachedMatch(input.region, match);
+      return match;
+    }
   };
 }
 
 async function fetchWithRetry(url, options) {
-  let response = await fetch(url, options);
+  while (true) {
+    await reserveRequestSlot();
+    const response = await fetch(url, options);
 
-  if (response.status === 429) {
-    const retryAfter = Number(response.headers.get('retry-after') || 2);
-    await sleep(Math.min(retryAfter, 10) * 1000);
-    response = await fetch(url, options);
+    if (response.status !== 429) {
+      return response;
+    }
+
+    const retryAfter = getRetryAfterSeconds(response);
+    setMessage(`Riot rate limit reached. Waiting ${retryAfter} second${retryAfter === 1 ? '' : 's'} before continuing.`);
+    nextRequestAt = Date.now() + (retryAfter * 1000);
+    await sleep(retryAfter * 1000);
   }
-
-  return response;
 }
 
-async function findSharedMatchIds(client, firstPuuid, secondPuuid) {
-  const firstSeen = new Set();
-  const secondSeen = new Set();
-  const sharedSeen = new Set();
-  const shared = [];
+function reserveRequestSlot() {
+  requestQueue = requestQueue.then(waitForRequestSlot, waitForRequestSlot);
+  return requestQueue;
+}
+
+async function waitForRequestSlot() {
+  const now = Date.now();
+  const waitMs = nextRequestAt - now;
+
+  if (waitMs > 0) {
+    await sleep(waitMs);
+  }
+
+  nextRequestAt = Math.max(Date.now(), nextRequestAt) + requestDelayMs;
+}
+
+function getRetryAfterSeconds(response) {
+  const retryAfter = Number(response.headers.get('retry-after'));
+
+  if (Number.isFinite(retryAfter) && retryAfter > 0) {
+    return Math.ceil(retryAfter);
+  }
+
+  return fallbackRateLimitSeconds;
+}
+
+async function findSharedMatches(client, firstPuuid, secondPuuid) {
+  const [firstIds, secondIds] = await getAvailableMatchIds(client, firstPuuid, secondPuuid);
+  const firstIdSet = new Set(firstIds);
+  const secondIdSet = new Set(secondIds);
+  const overlappingIds = firstIds.filter((matchId) => secondIdSet.has(matchId));
+  const oneSidedIds = [
+    ...firstIds.filter((matchId) => !secondIdSet.has(matchId)),
+    ...secondIds.filter((matchId) => !firstIdSet.has(matchId))
+  ];
+  const matches = [];
+  const foundIds = new Set();
+
+  await loadSharedMatches({
+    client,
+    matchIds: overlappingIds,
+    matches,
+    foundIds,
+    firstPuuid,
+    secondPuuid,
+    label: 'Loading confirmed shared match'
+  });
+
+  await loadSharedMatches({
+    client,
+    matchIds: oneSidedIds,
+    matches,
+    foundIds,
+    firstPuuid,
+    secondPuuid,
+    label: 'Verifying possible shared match'
+  });
+
+  return sortMatches(matches);
+}
+
+async function loadSharedMatches({ client, matchIds, matches, foundIds, firstPuuid, secondPuuid, label }) {
+  for (const [index, matchId] of matchIds.entries()) {
+    setMessage(`${label} ${index + 1} of ${matchIds.length}. Found ${matches.length} shared.`);
+    const match = await client.match(matchId);
+
+    if (hasParticipants(match, firstPuuid, secondPuuid) && !foundIds.has(match.metadata.matchId)) {
+      foundIds.add(match.metadata.matchId);
+      matches.push(formatMatch(match, firstPuuid, secondPuuid));
+      renderResults(sortMatches(matches));
+    }
+  }
+}
+
+async function getAvailableMatchIds(client, firstPuuid, secondPuuid) {
+  const firstIds = [];
+  const secondIds = [];
   let start = 0;
   let firstDone = false;
   let secondDone = false;
@@ -261,23 +345,69 @@ async function findSharedMatchIds(client, firstPuuid, secondPuuid) {
     firstDone = firstPage.length < batchSize;
     secondDone = secondPage.length < batchSize;
 
-    addMatches(firstPage, firstSeen, secondSeen, sharedSeen, shared);
-    addMatches(secondPage, secondSeen, firstSeen, sharedSeen, shared);
+    firstIds.push(...firstPage);
+    secondIds.push(...secondPage);
     start += batchSize;
   }
 
-  return shared;
+  return [firstIds, secondIds];
 }
 
-function addMatches(matches, ownSeen, otherSeen, sharedSeen, shared) {
-  for (const matchId of matches) {
-    ownSeen.add(matchId);
+function hasParticipants(match, firstPuuid, secondPuuid) {
+  return match.metadata.participants.includes(firstPuuid)
+    && match.metadata.participants.includes(secondPuuid);
+}
 
-    if (otherSeen.has(matchId) && !sharedSeen.has(matchId)) {
-      sharedSeen.add(matchId);
-      shared.push(matchId);
+function normalizeMatch(match) {
+  return {
+    metadata: {
+      matchId: match.metadata.matchId,
+      participants: match.metadata.participants
+    },
+    info: {
+      queueId: match.info.queueId,
+      gameCreation: match.info.gameCreation,
+      gameDuration: match.info.gameDuration,
+      gameMode: match.info.gameMode,
+      participants: match.info.participants.map((participant) => ({
+        puuid: participant.puuid,
+        riotIdGameName: participant.riotIdGameName,
+        riotIdTagline: participant.riotIdTagline,
+        summonerName: participant.summonerName,
+        championName: participant.championName,
+        teamId: participant.teamId,
+        win: participant.win,
+        kills: participant.kills,
+        deaths: participant.deaths,
+        assists: participant.assists
+      }))
     }
+  };
+}
+
+function readCachedMatch(region, matchId) {
+  try {
+    const cached = localStorage.getItem(getMatchCacheKey(region, matchId));
+    return cached ? JSON.parse(cached) : null;
+  } catch {
+    return null;
   }
+}
+
+function writeCachedMatch(region, match) {
+  try {
+    localStorage.setItem(getMatchCacheKey(region, match.metadata.matchId), JSON.stringify(match));
+  } catch {
+    // Browsers can reject storage when private mode or quota limits are active.
+  }
+}
+
+function getMatchCacheKey(region, matchId) {
+  return `${matchCachePrefix}${region}:${matchId}`;
+}
+
+function sortMatches(matches) {
+  return [...matches].sort((first, second) => second.startedAt - first.startedAt);
 }
 
 function formatMatch(match, firstPuuid, secondPuuid) {
