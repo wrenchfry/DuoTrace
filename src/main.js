@@ -1,6 +1,12 @@
 import './styles.css';
 
 const regions = ['americas', 'europe', 'asia', 'sea'];
+const batchSize = 100;
+const requestDelayMs = 1300;
+const fallbackRateLimitSeconds = 120;
+
+let nextRequestAt = 0;
+let requestQueue = Promise.resolve();
 
 const queueNames = new Map([
   [400, 'Draft Pick'],
@@ -128,14 +134,20 @@ form.addEventListener('submit', async (event) => {
 
   try {
     const input = getLookupInput();
-    await streamSharedMatches(input);
+    const client = createDuoTraceClient(input.region);
+    const [firstAccount, secondAccount] = await Promise.all([
+      client.account(input.first),
+      client.account(input.second)
+    ]);
 
-    if (!matches.length) {
+    const sharedMatches = await findSharedMatches(client, firstAccount.puuid, secondAccount.puuid);
+
+    if (!sharedMatches.length) {
       setMessage('No shared matches found in the available match history for both players.');
       return;
     }
 
-    setMessage(`${matches.length} shared match${matches.length === 1 ? '' : 'es'} found.`);
+    setMessage(`${sharedMatches.length} shared match${sharedMatches.length === 1 ? '' : 'es'} found.`);
   } catch (error) {
     setMessage(error.message || 'Something went wrong while checking match history.');
   } finally {
@@ -165,64 +177,167 @@ function parseRiotId(value) {
   };
 }
 
-async function streamSharedMatches(input) {
-  const response = await fetch('/api/shared-matches', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(input)
+function createDuoTraceClient(region) {
+  const request = async (path, body) => {
+    while (true) {
+      await reserveRequestSlot();
+      const response = await fetch(path, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ ...body, region })
+      });
+
+      if (response.status === 429) {
+        const detail = await safeJson(response);
+        const retryAfter = detail?.retryAfter || fallbackRateLimitSeconds;
+        setMessage(`Riot rate limit reached. Waiting ${retryAfter} second${retryAfter === 1 ? '' : 's'} before continuing.`);
+        nextRequestAt = Date.now() + (retryAfter * 1000);
+        await sleep(retryAfter * 1000);
+        continue;
+      }
+
+      if (!response.ok) {
+        const detail = await safeJson(response);
+        throw new Error(detail?.message || `Request failed with status ${response.status}.`);
+      }
+
+      return response.json();
+    }
+  };
+
+  return {
+    account: (account) => request('/api/account', { account }),
+    matchIds: (puuid, start) => request('/api/match-ids', { puuid, start }),
+    match: (matchId) => request('/api/match', { matchId })
+  };
+}
+
+function reserveRequestSlot() {
+  requestQueue = requestQueue.then(waitForRequestSlot, waitForRequestSlot);
+  return requestQueue;
+}
+
+async function waitForRequestSlot() {
+  const waitMs = nextRequestAt - Date.now();
+
+  if (waitMs > 0) {
+    await sleep(waitMs);
+  }
+
+  nextRequestAt = Math.max(Date.now(), nextRequestAt) + requestDelayMs;
+}
+
+async function findSharedMatches(client, firstPuuid, secondPuuid) {
+  const [firstIds, secondIds] = await getAvailableMatchIds(client, firstPuuid, secondPuuid);
+  const firstIdSet = new Set(firstIds);
+  const secondIdSet = new Set(secondIds);
+  const overlappingIds = firstIds.filter((matchId) => secondIdSet.has(matchId));
+  const oneSidedIds = [
+    ...firstIds.filter((matchId) => !secondIdSet.has(matchId)),
+    ...secondIds.filter((matchId) => !firstIdSet.has(matchId))
+  ];
+
+  await loadSharedMatches({
+    client,
+    matchIds: overlappingIds,
+    firstPuuid,
+    secondPuuid,
+    label: 'Loading confirmed shared match'
   });
 
-  if (!response.ok || !response.body) {
-    const detail = await safeJson(response);
-    throw new Error(detail?.message || `Request failed with status ${response.status}.`);
-  }
+  await loadSharedMatches({
+    client,
+    matchIds: oneSidedIds,
+    firstPuuid,
+    secondPuuid,
+    label: 'Verifying possible shared match'
+  });
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
+  return sortMatches(matches);
+}
 
-  while (true) {
-    const { value, done } = await reader.read();
+async function loadSharedMatches({ client, matchIds, firstPuuid, secondPuuid, label }) {
+  for (const [index, matchId] of matchIds.entries()) {
+    setMessage(`${label} ${index + 1} of ${matchIds.length}. Found ${matches.length} shared.`);
+    const match = await client.match(matchId);
 
-    if (done) {
-      break;
+    if (hasParticipants(match, firstPuuid, secondPuuid)) {
+      addMatch(formatMatch(match, firstPuuid, secondPuuid));
     }
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-
-    for (const line of lines) {
-      handleStreamEvent(JSON.parse(line));
-    }
-  }
-
-  if (buffer.trim()) {
-    handleStreamEvent(JSON.parse(buffer));
   }
 }
 
-function handleStreamEvent(event) {
-  if (event.type === 'message') {
-    setMessage(event.message);
-    return;
+async function getAvailableMatchIds(client, firstPuuid, secondPuuid) {
+  const firstIds = [];
+  const secondIds = [];
+  let start = 0;
+  let firstDone = false;
+  let secondDone = false;
+
+  while (!firstDone || !secondDone) {
+    setMessage(`Scanning games ${start + 1}-${start + batchSize}.`);
+
+    const [firstPage, secondPage] = await Promise.all([
+      firstDone ? [] : client.matchIds(firstPuuid, start),
+      secondDone ? [] : client.matchIds(secondPuuid, start)
+    ]);
+
+    firstDone = firstPage.length < batchSize;
+    secondDone = secondPage.length < batchSize;
+
+    firstIds.push(...firstPage);
+    secondIds.push(...secondPage);
+    start += batchSize;
   }
 
-  if (event.type === 'match') {
-    addMatch(event.match);
-    return;
-  }
+  return [firstIds, secondIds];
+}
 
-  if (event.type === 'done') {
-    setMessage(`${event.count} shared match${event.count === 1 ? '' : 'es'} found.`);
-    return;
-  }
+function hasParticipants(match, firstPuuid, secondPuuid) {
+  return match.metadata.participants.includes(firstPuuid)
+    && match.metadata.participants.includes(secondPuuid);
+}
 
-  if (event.type === 'error') {
-    throw new Error(event.message);
+function formatMatch(match, firstPuuid, secondPuuid) {
+  const first = match.info.participants.find((participant) => participant.puuid === firstPuuid);
+  const second = match.info.participants.find((participant) => participant.puuid === secondPuuid);
+
+  return {
+    id: match.metadata.matchId,
+    queueId: match.info.queueId,
+    queue: queueNames.get(match.info.queueId) || `Queue ${match.info.queueId}`,
+    startedAt: new Date(match.info.gameCreation),
+    duration: formatDuration(match.info.gameDuration),
+    gameMode: match.info.gameMode,
+    first: formatParticipant(first),
+    second: formatParticipant(second)
+  };
+}
+
+function formatParticipant(participant) {
+  return {
+    name: participant.riotIdGameName
+      ? `${participant.riotIdGameName}#${participant.riotIdTagline}`
+      : participant.summonerName,
+    champion: participant.championName,
+    teamId: participant.teamId,
+    win: participant.win,
+    kda: `${participant.kills}/${participant.deaths}/${participant.assists}`
+  };
+}
+
+async function safeJson(response) {
+  try {
+    return await response.json();
+  } catch {
+    return null;
   }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function addMatch(match) {
@@ -318,14 +433,6 @@ function getLeagueOfGraphsUrl(match) {
   }
 
   return `https://www.leagueofgraphs.com/match/${regionSlug}/${numericId}`;
-}
-
-async function safeJson(response) {
-  try {
-    return await response.json();
-  } catch {
-    return null;
-  }
 }
 
 function setMessage(text) {
