@@ -8,15 +8,15 @@ export default {
       const url = new URL(request.url);
 
       if (url.pathname === '/api/account') {
-        return handleAccount(request, env);
+        return await handleAccount(request, env);
       }
 
       if (url.pathname === '/api/match-ids') {
-        return handleMatchIds(request, env);
+        return await handleMatchIds(request, env);
       }
 
       if (url.pathname === '/api/match') {
-        return handleMatch(request, env);
+        return await handleMatch(request, env);
       }
 
       return env.ASSETS.fetch(request);
