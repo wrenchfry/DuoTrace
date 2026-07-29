@@ -1,13 +1,6 @@
 import './styles.css';
 
 const regions = ['americas', 'europe', 'asia', 'sea'];
-const batchSize = 100;
-const requestDelayMs = 1300;
-const fallbackRateLimitSeconds = 120;
-const matchCachePrefix = 'duotrace:match:v1:';
-
-let nextRequestAt = 0;
-let requestQueue = Promise.resolve();
 
 const queueNames = new Map([
   [400, 'Draft Pick'],
@@ -40,15 +33,13 @@ document.querySelector('#app').innerHTML = `
           <span class="brand-mark" aria-hidden="true">D</span>
           <span>DuoTrace</span>
         </a>
-        <a class="nav-link" href="https://developer.riotgames.com/" target="_blank" rel="noreferrer">Get a Riot key</a>
       </nav>
 
       <div class="hero-grid">
         <div class="hero-copy">
           <h1>Find games two Riot IDs shared.</h1>
           <p>
-            Paste your Riot API key, enter two players, and scan match history from
-            newest to oldest available.
+            Enter two players and scan match history from newest to oldest available.
           </p>
         </div>
         <aside class="summary-card" aria-live="polite">
@@ -61,11 +52,6 @@ document.querySelector('#app').innerHTML = `
 
     <section class="lookup-panel">
       <form id="lookupForm" class="lookup-form">
-        <label class="key-field">
-          <span>Riot API key</span>
-          <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="RGAPI-..." required />
-        </label>
-
         <div class="form-grid">
           <label>
             <span>First Riot ID</span>
@@ -106,20 +92,13 @@ const submitButton = document.querySelector('#submitButton');
 const clearButton = document.querySelector('#clearButton');
 const region = document.querySelector('#region');
 const regionLabel = document.querySelector('#regionLabel');
-const apiKey = document.querySelector('#apiKey');
+
+const matches = [];
+const foundIds = new Set();
 
 updateRegionLabel();
 
 window.addEventListener('pageshow', updateRegionLabel);
-
-apiKey.addEventListener('input', () => {
-  const normalized = normalizeApiKey(apiKey.value);
-
-  if (apiKey.value !== normalized) {
-    apiKey.value = normalized;
-  }
-});
-
 region.addEventListener('change', updateRegionLabel);
 
 function updateRegionLabel() {
@@ -127,7 +106,7 @@ function updateRegionLabel() {
 }
 
 clearButton.addEventListener('click', () => {
-  resultList.innerHTML = '';
+  clearResults();
   setMessage('Enter both Riot IDs to search for shared matches.');
 });
 
@@ -135,25 +114,18 @@ form.addEventListener('submit', async (event) => {
   event.preventDefault();
   submitButton.disabled = true;
   submitButton.textContent = 'Scanning...';
-  resultList.innerHTML = '';
+  clearResults();
   setMessage('Resolving Riot accounts.');
 
   try {
     const input = getLookupInput();
-    const client = createRiotClient(input);
-    const [firstAccount, secondAccount] = await Promise.all([
-      client.account(input.first),
-      client.account(input.second)
-    ]);
-
-    const matches = await findSharedMatches(client, firstAccount.puuid, secondAccount.puuid);
+    await streamSharedMatches(input);
 
     if (!matches.length) {
       setMessage('No shared matches found in the available match history for both players.');
       return;
     }
 
-    renderResults(matches);
     setMessage(`${matches.length} shared match${matches.length === 1 ? '' : 'es'} found.`);
   } catch (error) {
     setMessage(error.message || 'Something went wrong while checking match history.');
@@ -164,25 +136,11 @@ form.addEventListener('submit', async (event) => {
 });
 
 function getLookupInput() {
-  const normalizedApiKey = normalizeApiKey(apiKey.value);
-  apiKey.value = normalizedApiKey;
-
-  if (!/^RGAPI-[0-9a-f-]{36}$/i.test(normalizedApiKey)) {
-    throw new Error('Use the full Riot development key format: RGAPI-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.');
-  }
-
   return {
-    apiKey: normalizedApiKey,
     first: parseRiotId(document.querySelector('#playerOne').value),
     second: parseRiotId(document.querySelector('#playerTwo').value),
     region: region.value
   };
-}
-
-function normalizeApiKey(value) {
-  return value
-    .replace(/[\s\u200B-\u200D\uFEFF]/g, '')
-    .trim();
 }
 
 function parseRiotId(value) {
@@ -198,256 +156,97 @@ function parseRiotId(value) {
   };
 }
 
-function createRiotClient(input) {
-  const request = async (path) => {
-    const response = await fetchWithRetry(`https://${input.region}.api.riotgames.com${path}`, {
-      headers: {
-        'X-Riot-Token': input.apiKey
-      }
-    });
-
-    if (!response.ok) {
-      const detail = await safeJson(response);
-      const status = detail?.status?.message || response.statusText;
-
-      if (response.status === 401 && status.toLowerCase().includes('apikey')) {
-        throw new Error('Riot did not accept that API key. Paste a fresh RGAPI key from the Riot developer portal; development keys expire and stop working even when the format looks correct.');
-      }
-
-      throw new Error(`Riot API returned ${response.status}: ${status}`);
-    }
-
-    return response.json();
-  };
-
-  return {
-    account: ({ gameName, tagLine }) => request(`/riot/account/v1/accounts/by-riot-id/${encodeURIComponent(gameName)}/${encodeURIComponent(tagLine)}`),
-    matchIds: (puuid, start) => request(`/lol/match/v5/matches/by-puuid/${encodeURIComponent(puuid)}/ids?start=${start}&count=${batchSize}`),
-    match: async (matchId) => {
-      const cached = readCachedMatch(input.region, matchId);
-
-      if (cached) {
-        return cached;
-      }
-
-      const match = normalizeMatch(await request(`/lol/match/v5/matches/${encodeURIComponent(matchId)}`));
-      writeCachedMatch(input.region, match);
-      return match;
-    }
-  };
-}
-
-async function fetchWithRetry(url, options) {
-  while (true) {
-    await reserveRequestSlot();
-    const response = await fetch(url, options);
-
-    if (response.status !== 429) {
-      return response;
-    }
-
-    const retryAfter = getRetryAfterSeconds(response);
-    setMessage(`Riot rate limit reached. Waiting ${retryAfter} second${retryAfter === 1 ? '' : 's'} before continuing.`);
-    nextRequestAt = Date.now() + (retryAfter * 1000);
-    await sleep(retryAfter * 1000);
-  }
-}
-
-function reserveRequestSlot() {
-  requestQueue = requestQueue.then(waitForRequestSlot, waitForRequestSlot);
-  return requestQueue;
-}
-
-async function waitForRequestSlot() {
-  const now = Date.now();
-  const waitMs = nextRequestAt - now;
-
-  if (waitMs > 0) {
-    await sleep(waitMs);
-  }
-
-  nextRequestAt = Math.max(Date.now(), nextRequestAt) + requestDelayMs;
-}
-
-function getRetryAfterSeconds(response) {
-  const retryAfter = Number(response.headers.get('retry-after'));
-
-  if (Number.isFinite(retryAfter) && retryAfter > 0) {
-    return Math.ceil(retryAfter);
-  }
-
-  return fallbackRateLimitSeconds;
-}
-
-async function findSharedMatches(client, firstPuuid, secondPuuid) {
-  const [firstIds, secondIds] = await getAvailableMatchIds(client, firstPuuid, secondPuuid);
-  const firstIdSet = new Set(firstIds);
-  const secondIdSet = new Set(secondIds);
-  const overlappingIds = firstIds.filter((matchId) => secondIdSet.has(matchId));
-  const oneSidedIds = [
-    ...firstIds.filter((matchId) => !secondIdSet.has(matchId)),
-    ...secondIds.filter((matchId) => !firstIdSet.has(matchId))
-  ];
-  const matches = [];
-  const foundIds = new Set();
-
-  await loadSharedMatches({
-    client,
-    matchIds: overlappingIds,
-    matches,
-    foundIds,
-    firstPuuid,
-    secondPuuid,
-    label: 'Loading confirmed shared match'
-  });
-
-  await loadSharedMatches({
-    client,
-    matchIds: oneSidedIds,
-    matches,
-    foundIds,
-    firstPuuid,
-    secondPuuid,
-    label: 'Verifying possible shared match'
-  });
-
-  return sortMatches(matches);
-}
-
-async function loadSharedMatches({ client, matchIds, matches, foundIds, firstPuuid, secondPuuid, label }) {
-  for (const [index, matchId] of matchIds.entries()) {
-    setMessage(`${label} ${index + 1} of ${matchIds.length}. Found ${matches.length} shared.`);
-    const match = await client.match(matchId);
-
-    if (hasParticipants(match, firstPuuid, secondPuuid) && !foundIds.has(match.metadata.matchId)) {
-      foundIds.add(match.metadata.matchId);
-      matches.push(formatMatch(match, firstPuuid, secondPuuid));
-      renderResults(sortMatches(matches));
-    }
-  }
-}
-
-async function getAvailableMatchIds(client, firstPuuid, secondPuuid) {
-  const firstIds = [];
-  const secondIds = [];
-  let start = 0;
-  let firstDone = false;
-  let secondDone = false;
-
-  while (!firstDone || !secondDone) {
-    setMessage(`Scanning games ${start + 1}-${start + batchSize}.`);
-
-    const [firstPage, secondPage] = await Promise.all([
-      firstDone ? [] : client.matchIds(firstPuuid, start),
-      secondDone ? [] : client.matchIds(secondPuuid, start)
-    ]);
-
-    firstDone = firstPage.length < batchSize;
-    secondDone = secondPage.length < batchSize;
-
-    firstIds.push(...firstPage);
-    secondIds.push(...secondPage);
-    start += batchSize;
-  }
-
-  return [firstIds, secondIds];
-}
-
-function hasParticipants(match, firstPuuid, secondPuuid) {
-  return match.metadata.participants.includes(firstPuuid)
-    && match.metadata.participants.includes(secondPuuid);
-}
-
-function normalizeMatch(match) {
-  return {
-    metadata: {
-      matchId: match.metadata.matchId,
-      participants: match.metadata.participants
+async function streamSharedMatches(input) {
+  const response = await fetch('/api/shared-matches', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
     },
-    info: {
-      queueId: match.info.queueId,
-      gameCreation: match.info.gameCreation,
-      gameDuration: match.info.gameDuration,
-      gameMode: match.info.gameMode,
-      participants: match.info.participants.map((participant) => ({
-        puuid: participant.puuid,
-        riotIdGameName: participant.riotIdGameName,
-        riotIdTagline: participant.riotIdTagline,
-        summonerName: participant.summonerName,
-        championName: participant.championName,
-        teamId: participant.teamId,
-        win: participant.win,
-        kills: participant.kills,
-        deaths: participant.deaths,
-        assists: participant.assists
-      }))
+    body: JSON.stringify(input)
+  });
+
+  if (!response.ok || !response.body) {
+    const detail = await safeJson(response);
+    throw new Error(detail?.message || `Request failed with status ${response.status}.`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { value, done } = await reader.read();
+
+    if (done) {
+      break;
     }
-  };
-}
 
-function readCachedMatch(region, matchId) {
-  try {
-    const cached = localStorage.getItem(getMatchCacheKey(region, matchId));
-    return cached ? JSON.parse(cached) : null;
-  } catch {
-    return null;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      handleStreamEvent(JSON.parse(line));
+    }
+  }
+
+  if (buffer.trim()) {
+    handleStreamEvent(JSON.parse(buffer));
   }
 }
 
-function writeCachedMatch(region, match) {
-  try {
-    localStorage.setItem(getMatchCacheKey(region, match.metadata.matchId), JSON.stringify(match));
-  } catch {
-    // Browsers can reject storage when private mode or quota limits are active.
+function handleStreamEvent(event) {
+  if (event.type === 'message') {
+    setMessage(event.message);
+    return;
+  }
+
+  if (event.type === 'match') {
+    addMatch(event.match);
+    return;
+  }
+
+  if (event.type === 'done') {
+    setMessage(`${event.count} shared match${event.count === 1 ? '' : 'es'} found.`);
+    return;
+  }
+
+  if (event.type === 'error') {
+    throw new Error(event.message);
   }
 }
 
-function getMatchCacheKey(region, matchId) {
-  return `${matchCachePrefix}${region}:${matchId}`;
+function addMatch(match) {
+  if (foundIds.has(match.id)) {
+    return;
+  }
+
+  foundIds.add(match.id);
+  matches.push({
+    ...match,
+    startedAt: new Date(match.startedAt)
+  });
+  renderResults(sortMatches(matches));
 }
 
-function sortMatches(matches) {
-  return [...matches].sort((first, second) => second.startedAt - first.startedAt);
-}
-
-function formatMatch(match, firstPuuid, secondPuuid) {
-  const first = match.info.participants.find((participant) => participant.puuid === firstPuuid);
-  const second = match.info.participants.find((participant) => participant.puuid === secondPuuid);
-
-  return {
-    id: match.metadata.matchId,
-    queue: queueNames.get(match.info.queueId) || `Queue ${match.info.queueId}`,
-    startedAt: new Date(match.info.gameCreation),
-    duration: formatDuration(match.info.gameDuration),
-    gameMode: match.info.gameMode,
-    first: formatParticipant(first),
-    second: formatParticipant(second)
-  };
-}
-
-function formatParticipant(participant) {
-  return {
-    name: participant.riotIdGameName
-      ? `${participant.riotIdGameName}#${participant.riotIdTagline}`
-      : participant.summonerName,
-    champion: participant.championName,
-    teamId: participant.teamId,
-    win: participant.win,
-    kda: `${participant.kills}/${participant.deaths}/${participant.assists}`
-  };
+function clearResults() {
+  matches.length = 0;
+  foundIds.clear();
+  resultList.innerHTML = '';
 }
 
 function renderResults(matches) {
   resultList.innerHTML = matches.map((match) => {
     const together = match.first.teamId === match.second.teamId;
     const matchUrl = getLeagueOfGraphsUrl(match);
+    const queue = queueNames.get(match.queueId) || match.queue;
 
     return `
       <article class="match-card">
         <div class="match-heading">
           <div>
             <span class="match-date">${escapeHtml(formatDate(match.startedAt))}</span>
-            <h2>${escapeHtml(match.queue)}</h2>
+            <h2>${escapeHtml(queue)}</h2>
           </div>
           <span class="team-chip">${together ? 'Same team' : 'Opposite teams'}</span>
         </div>
@@ -531,18 +330,12 @@ function formatDate(date) {
   }).format(date);
 }
 
-function formatDuration(seconds) {
-  const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = seconds % 60;
-  return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
-}
-
 function titleCase(value) {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sortMatches(matches) {
+  return [...matches].sort((first, second) => second.startedAt - first.startedAt);
 }
 
 function escapeHtml(value) {
