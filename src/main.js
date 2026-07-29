@@ -31,6 +31,7 @@ document.querySelector('#app').innerHTML = `
       <nav class="topbar" aria-label="DuoTrace">
         <a class="brand" href="./" aria-label="DuoTrace home">
           <span class="brand-mark" aria-hidden="true">D</span>
+          <span>DuoTrace</span>
         </a>
       </nav>
 
