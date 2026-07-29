@@ -78,9 +78,9 @@ document.querySelector('#app').innerHTML = `
     <aside class="limitations-panel" aria-label="Data limitations">
       <strong>Data limits</strong>
       <p>
-        Riot match history is limited by Riot's available data. DuoTrace can only find games
-        still returned by Match V5, typically recent matches within Riot's retention window
-        and up to roughly the latest 1,000 match IDs per player.
+        DuoTrace can only find games Riot still makes available. Older games may disappear
+        after about 2 years, and very active players may only have roughly their latest
+        1,000 games available to search.
       </p>
     </aside>
 
