@@ -107,6 +107,7 @@ a {
 
 .summary-card,
 .lookup-panel,
+.limitations-panel,
 .message,
 .match-card {
   border: 1px solid rgba(24, 25, 23, 0.1);
@@ -142,6 +143,25 @@ dt,
 
 .lookup-panel {
   padding: 24px;
+}
+
+.limitations-panel {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+  padding: 16px 18px;
+  color: #4f4c46;
+}
+
+.limitations-panel strong {
+  color: #174f47;
+  font-size: 14px;
+}
+
+.limitations-panel p {
+  max-width: 880px;
+  margin: 0;
+  line-height: 1.55;
 }
 
 .lookup-form {
