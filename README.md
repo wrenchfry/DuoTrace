@@ -59,3 +59,7 @@ Results are limited to the match history returned by Riot's API. Older games may
 ## Security
 
 Keep `RIOT_API_KEY` in `.dev.vars` locally and in a Cloudflare Worker secret in production. Do not commit it to the repository; the `.dev.vars` file is already ignored by Git.
+
+## Analytics platform
+
+The optional Microsoft Fabric analytics platform ingests completed DuoTrace searches from Cloudflare D1. Its source files and setup notes are in [`fabric/`](fabric/README.md). The live lookup continues to use the Worker and Riot API directly.

@@ -1,0 +1,23 @@
+{
+  "properties": {
+    "description": "Runs the DuoTrace Bronze application export notebook.",
+    "activities": [
+      {
+        "name": "Run Bronze DuoTrace export",
+        "type": "TridentNotebook",
+        "dependsOn": [],
+        "typeProperties": {
+          "notebookId": "REPLACE_WITH_BRONZE_NOTEBOOK_ID",
+          "workspaceId": "REPLACE_WITH_DUOTRACE_WORKSPACE_ID",
+          "parameters": {},
+          "sessionTag": "duotrace-bronze-export"
+        },
+        "policy": {
+          "timeout": "0.02:00:00",
+          "retry": 1,
+          "retryIntervalInSeconds": 60
+        }
+      }
+    ]
+  }
+}
