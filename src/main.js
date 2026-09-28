@@ -95,6 +95,44 @@ document.querySelector('#app').innerHTML = `
       <div id="message" class="message">
         Enter both Riot IDs to search for shared matches.
       </div>
+      <section id="dashboard" class="dashboard" hidden aria-label="DuoTrace analytics dashboard">
+        <div class="dashboard-heading">
+          <div>
+            <span class="eyebrow">DuoTrace analytics</span>
+            <h2>Shared-game insights</h2>
+          </div>
+          <div class="dashboard-tabs" role="tablist" aria-label="Dashboard pages">
+            <button class="dashboard-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="insightsPage" data-dashboard-page="insights">Duo insights</button>
+            <button class="dashboard-tab" type="button" role="tab" aria-selected="false" aria-controls="healthPage" data-dashboard-page="health">Search health</button>
+          </div>
+        </div>
+
+        <div id="insightsPage" class="dashboard-page" role="tabpanel">
+          <div id="insightMetrics" class="metric-grid"></div>
+          <div class="dashboard-grid">
+            <article class="dashboard-card">
+              <span class="card-label">Queue distribution</span>
+              <div id="queueBreakdown" class="breakdown-list"></div>
+            </article>
+            <article class="dashboard-card">
+              <span class="card-label">Most common champion pairings</span>
+              <div id="championBreakdown" class="breakdown-list"></div>
+            </article>
+          </div>
+          <article class="dashboard-card activity-card">
+            <span class="card-label">Shared games over time</span>
+            <div id="activityBreakdown" class="activity-list"></div>
+          </article>
+        </div>
+
+        <div id="healthPage" class="dashboard-page" role="tabpanel" hidden>
+          <div id="healthMetrics" class="metric-grid"></div>
+          <article class="dashboard-card health-note">
+            <span class="card-label">What this run verifies</span>
+            <p id="healthSummary"></p>
+          </article>
+        </div>
+      </section>
       <div id="resultList" class="result-list"></div>
     </section>
   </main>
@@ -107,9 +145,17 @@ const submitButton = document.querySelector('#submitButton');
 const clearButton = document.querySelector('#clearButton');
 const region = document.querySelector('#region');
 const regionLabel = document.querySelector('#regionLabel');
+const dashboard = document.querySelector('#dashboard');
+const insightMetrics = document.querySelector('#insightMetrics');
+const queueBreakdown = document.querySelector('#queueBreakdown');
+const championBreakdown = document.querySelector('#championBreakdown');
+const activityBreakdown = document.querySelector('#activityBreakdown');
+const healthMetrics = document.querySelector('#healthMetrics');
+const healthSummary = document.querySelector('#healthSummary');
 
 const matches = [];
 const foundIds = new Set();
+let scanMetrics = createScanMetrics();
 
 updateRegionLabel();
 
@@ -125,11 +171,16 @@ clearButton.addEventListener('click', () => {
   setMessage('Enter both Riot IDs to search for shared matches.');
 });
 
+document.querySelectorAll('[data-dashboard-page]').forEach((button) => {
+  button.addEventListener('click', () => setDashboardPage(button.dataset.dashboardPage));
+});
+
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
   submitButton.disabled = true;
   submitButton.textContent = 'Scanning...';
   clearResults();
+  scanMetrics = createScanMetrics();
   setMessage('Resolving Riot accounts.');
 
   try {
@@ -141,14 +192,25 @@ form.addEventListener('submit', async (event) => {
     ]);
 
     const sharedMatches = await findSharedMatches(client, firstAccount.puuid, secondAccount.puuid);
+    void client.recordSearch({
+      first: input.first,
+      second: input.second,
+      matches: sharedMatches
+    }).catch(() => undefined);
 
     if (!sharedMatches.length) {
+      finishScan('complete');
+      renderDashboard();
       setMessage('No shared matches found in the available match history for both players.');
       return;
     }
 
+    finishScan('complete');
+    renderDashboard();
     setMessage(`${sharedMatches.length} shared match${sharedMatches.length === 1 ? '' : 'es'} found.`);
   } catch (error) {
+    finishScan('failed', error.message);
+    renderDashboard();
     setMessage(error.message || 'Something went wrong while checking match history.');
   } finally {
     submitButton.disabled = false;
@@ -178,9 +240,10 @@ function parseRiotId(value) {
 }
 
 function createDuoTraceClient(region) {
-  const request = async (path, body) => {
+  const request = async (path, body, metric) => {
     while (true) {
       await reserveRequestSlot();
+      scanMetrics[metric] += 1;
       const response = await fetch(path, {
         method: 'POST',
         headers: {
@@ -190,6 +253,7 @@ function createDuoTraceClient(region) {
       });
 
       if (response.status === 429) {
+        scanMetrics.rateLimitRetries += 1;
         const detail = await safeJson(response);
         const retryAfter = detail?.retryAfter || fallbackRateLimitSeconds;
         setMessage(`Riot rate limit reached. Waiting ${retryAfter} second${retryAfter === 1 ? '' : 's'} before continuing.`);
@@ -207,10 +271,25 @@ function createDuoTraceClient(region) {
     }
   };
 
+  const recordSearch = async (search) => {
+    const response = await fetch('/api/analytics/searches', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ ...search, region })
+    });
+
+    if (!response.ok) {
+      throw new Error('Search analytics could not be recorded.');
+    }
+  };
+
   return {
-    account: (account) => request('/api/account', { account }),
-    matchIds: (puuid, start) => request('/api/match-ids', { puuid, start }),
-    match: (matchId) => request('/api/match', { matchId })
+    account: (account) => request('/api/account', { account }, 'accountRequests'),
+    matchIds: (puuid, start) => request('/api/match-ids', { puuid, start }, 'historyRequests'),
+    match: (matchId) => request('/api/match', { matchId }, 'matchRequests'),
+    recordSearch
   };
 }
 
@@ -238,6 +317,7 @@ async function findSharedMatches(client, firstPuuid, secondPuuid) {
     ...firstIds.filter((matchId) => !secondIdSet.has(matchId)),
     ...secondIds.filter((matchId) => !firstIdSet.has(matchId))
   ];
+  scanMetrics.candidateMatches = overlappingIds.length + oneSidedIds.length;
 
   await loadSharedMatches({
     client,
@@ -357,6 +437,151 @@ function clearResults() {
   matches.length = 0;
   foundIds.clear();
   resultList.innerHTML = '';
+  dashboard.hidden = true;
+}
+
+function createScanMetrics() {
+  return {
+    startedAt: new Date(),
+    endedAt: null,
+    status: 'running',
+    error: '',
+    accountRequests: 0,
+    historyRequests: 0,
+    matchRequests: 0,
+    candidateMatches: 0,
+    rateLimitRetries: 0
+  };
+}
+
+function finishScan(status, error = '') {
+  scanMetrics.status = status;
+  scanMetrics.error = error;
+  scanMetrics.endedAt = new Date();
+}
+
+function renderDashboard() {
+  const sortedMatches = sortMatches(matches);
+  dashboard.hidden = false;
+  insightMetrics.innerHTML = [
+    metricCard('Shared matches', sortedMatches.length),
+    metricCard('Same team', sortedMatches.filter((match) => match.first.teamId === match.second.teamId).length),
+    metricCard('Opponents', sortedMatches.filter((match) => match.first.teamId !== match.second.teamId).length),
+    metricCard('Duo win rate', formatPercentage(getDuoWinRate(sortedMatches)))
+  ].join('');
+
+  renderBreakdown(queueBreakdown, countBy(sortedMatches, (match) => match.queue), 'No shared games found.');
+  renderBreakdown(
+    championBreakdown,
+    countBy(sortedMatches, (match) => `${match.first.champion} + ${match.second.champion}`),
+    'No shared games found.'
+  );
+  renderActivity(sortedMatches);
+
+  const totalRequests = scanMetrics.accountRequests + scanMetrics.historyRequests + scanMetrics.matchRequests;
+  healthMetrics.innerHTML = [
+    metricCard('Search status', scanMetrics.status === 'complete' ? 'Healthy' : 'Needs attention', scanMetrics.status),
+    metricCard('Last checked', formatShortDate(scanMetrics.endedAt || scanMetrics.startedAt)),
+    metricCard('API requests', totalRequests),
+    metricCard('Rate-limit retries', scanMetrics.rateLimitRetries)
+  ].join('');
+
+  healthSummary.textContent = buildHealthSummary(totalRequests);
+}
+
+function setDashboardPage(page) {
+  const isInsights = page === 'insights';
+  document.querySelector('#insightsPage').hidden = !isInsights;
+  document.querySelector('#healthPage').hidden = isInsights;
+
+  document.querySelectorAll('[data-dashboard-page]').forEach((button) => {
+    const selected = button.dataset.dashboardPage === page;
+    button.classList.toggle('is-active', selected);
+    button.setAttribute('aria-selected', String(selected));
+  });
+}
+
+function metricCard(label, value, tone = '') {
+  return `
+    <article class="metric-card ${escapeHtml(tone)}">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </article>
+  `;
+}
+
+function countBy(items, getLabel) {
+  return items.reduce((counts, item) => {
+    const label = getLabel(item);
+    counts.set(label, (counts.get(label) || 0) + 1);
+    return counts;
+  }, new Map());
+}
+
+function renderBreakdown(container, counts, emptyMessage) {
+  const entries = [...counts.entries()].sort(([, firstCount], [, secondCount]) => secondCount - firstCount).slice(0, 5);
+
+  if (!entries.length) {
+    container.innerHTML = `<p class="empty-state">${escapeHtml(emptyMessage)}</p>`;
+    return;
+  }
+
+  const maximum = entries[0][1];
+  container.innerHTML = entries.map(([label, count]) => `
+    <div class="breakdown-row">
+      <div><span>${escapeHtml(label)}</span><strong>${count}</strong></div>
+      <i><b style="width: ${(count / maximum) * 100}%"></b></i>
+    </div>
+  `).join('');
+}
+
+function renderActivity(sortedMatches) {
+  const entries = [...countBy(sortedMatches, (match) => new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    year: 'numeric'
+  }).format(match.startedAt)).entries()].reverse().slice(-6);
+
+  if (!entries.length) {
+    activityBreakdown.innerHTML = '<p class="empty-state">No shared games found.</p>';
+    return;
+  }
+
+  const maximum = Math.max(...entries.map(([, count]) => count));
+  activityBreakdown.innerHTML = entries.map(([label, count]) => `
+    <div class="activity-row">
+      <span>${escapeHtml(label)}</span>
+      <div><i style="height: ${Math.max(14, (count / maximum) * 100)}%"></i><strong>${count}</strong></div>
+    </div>
+  `).join('');
+}
+
+function getDuoWinRate(currentMatches) {
+  const sameTeamMatches = currentMatches.filter((match) => match.first.teamId === match.second.teamId);
+
+  if (!sameTeamMatches.length) {
+    return null;
+  }
+
+  return sameTeamMatches.filter((match) => match.first.win && match.second.win).length / sameTeamMatches.length;
+}
+
+function formatPercentage(value) {
+  return value === null ? '—' : `${Math.round(value * 100)}%`;
+}
+
+function formatShortDate(date) {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short'
+  }).format(date);
+}
+
+function buildHealthSummary(totalRequests) {
+  if (scanMetrics.status === 'failed') {
+    return `This scan stopped after ${totalRequests} API request${totalRequests === 1 ? '' : 's'}. ${scanMetrics.error || 'Check the API response and retry the scan.'}`;
+  }
+
+  return `This scan resolved two Riot accounts, read ${scanMetrics.historyRequests} match-history page${scanMetrics.historyRequests === 1 ? '' : 's'}, and checked ${scanMetrics.candidateMatches} possible shared match${scanMetrics.candidateMatches === 1 ? '' : 'es'}. ${scanMetrics.rateLimitRetries ? `It retried ${scanMetrics.rateLimitRetries} time${scanMetrics.rateLimitRetries === 1 ? '' : 's'} after Riot rate limiting.` : 'No Riot rate-limit retries were needed.'}`;
 }
 
 function renderResults(matches) {
