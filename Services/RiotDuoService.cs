@@ -7,6 +7,13 @@ namespace DuoTraceApp.Services;
 public interface IRiotDuoService
 {
     Task<DuoTraceSearchResult> SearchAsync(DuoTraceSearchRequest request, CancellationToken cancellationToken = default);
+    Task SearchProgressivelyAsync(
+        DuoTraceSearchRequest request,
+        Func<DuoTraceSearchResult, Task> onPreview,
+        Action<string> onProgress,
+        Action<DuoTraceSearchResult> onPartialResults,
+        Action<DuoTraceSearchResult> onCompleted,
+        CancellationToken cancellationToken = default);
 }
 
 public sealed class DuoTraceSearchResult
@@ -15,10 +22,16 @@ public sealed class DuoTraceSearchResult
     public DuoTraceSummary Summary { get; init; } = new();
 }
 
+public sealed class RiotApiException(System.Net.HttpStatusCode statusCode, string message) : Exception(message)
+{
+    public System.Net.HttpStatusCode StatusCode { get; } = statusCode;
+}
+
 public sealed class RiotDuoService : IRiotDuoService
 {
     private const int BatchSize = 100;
-    private const int RequestDelayMs = 1200;
+    private const int PreviewSize = 20;
+    private const int MaxConcurrentMatchRequests = 5;
     private static readonly string[] SupportedRegions = ["americas", "europe", "asia", "sea"];
     private static readonly Dictionary<int, string> QueueNames = new()
     {
@@ -52,128 +65,230 @@ public sealed class RiotDuoService : IRiotDuoService
     {
         _httpClient = httpClient;
         _logger = logger;
-        _apiKey = configuration["RIOT_API_KEY"] ?? configuration["RiotApi:ApiKey"] ?? Environment.GetEnvironmentVariable("RIOT_API_KEY")
-            ?? throw new InvalidOperationException("Missing Riot API key. Set the RIOT_API_KEY environment variable or dotnet user-secrets.");
+        _apiKey = new[]
+            {
+                Environment.GetEnvironmentVariable("RIOT_API_KEY"),
+                configuration["RIOT_API_KEY"],
+                configuration["RiotApi:ApiKey"]
+            }
+            .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))
+            ?? string.Empty;
     }
 
     public async Task<DuoTraceSearchResult> SearchAsync(DuoTraceSearchRequest request, CancellationToken cancellationToken = default)
     {
+        DuoTraceSearchResult? result = null;
+        await SearchProgressivelyAsync(request, _ => Task.CompletedTask, _ => { }, _ => { }, completed => result = completed, cancellationToken);
+        return result ?? throw new InvalidOperationException("The Riot match search did not return a result.");
+    }
+
+    public async Task SearchProgressivelyAsync(
+        DuoTraceSearchRequest request,
+        Func<DuoTraceSearchResult, Task> onPreview,
+        Action<string> onProgress,
+        Action<DuoTraceSearchResult> onPartialResults,
+        Action<DuoTraceSearchResult> onCompleted,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(_apiKey))
+        {
+            throw new InvalidOperationException("Missing Riot API key. Set the RIOT_API_KEY environment variable before searching.");
+        }
+
         var first = ParseRiotId(request.FirstPlayer);
         var second = ParseRiotId(request.SecondPlayer);
 
-        var firstCandidates = request.Region == "all"
-            ? await ResolveAccountsAcrossRegionsAsync(first, cancellationToken)
-            : await ResolveAccountsForRegionAsync(request.Region, first, cancellationToken);
-
-        var secondCandidates = request.Region == "all"
-            ? await ResolveAccountsAcrossRegionsAsync(second, cancellationToken)
-            : await ResolveAccountsForRegionAsync(request.Region, second, cancellationToken);
-
-        var matchMap = new Dictionary<string, DuoTraceMatchItem>();
-        foreach (var firstCandidate in firstCandidates)
-        {
-            foreach (var secondCandidate in secondCandidates)
-            {
-                var sharedMatches = await FindSharedMatchesForPlayersAsync(firstCandidate.Region, secondCandidate.Region, firstCandidate.AccountPuuid, secondCandidate.AccountPuuid, cancellationToken);
-                foreach (var match in sharedMatches)
-                {
-                    matchMap[match.MatchId] = match;
-                }
-            }
-        }
-
-        var matches = SortMatches(matchMap.Values)
-            .Where(match => DuoTraceAnalytics.MatchesPatchAndMonthFilter(match, request.Patch, request.Month))
+        var (firstCandidates, secondCandidates) = await ResolveAccountPairsAsync(request.Region, first, second, cancellationToken);
+        var candidatePairs = firstCandidates
+            .SelectMany(firstCandidate => secondCandidates.Select(secondCandidate => new CandidatePair(firstCandidate, secondCandidate)))
+            .ToList();
+        var accounts = candidatePairs
+            .SelectMany(pair => new[] { pair.First, pair.Second })
+            .Distinct()
             .ToList();
 
-        return new DuoTraceSearchResult
-        {
-            Matches = matches,
-            Summary = DuoTraceAnalytics.BuildSummary(matches)
-        };
-    }
+        onProgress("Checking each player's most recent matches.");
+        var recentHistoryTasks = accounts.ToDictionary(
+            account => account,
+            account => GetMatchIdsAsync(account.Region, account.AccountPuuid, 0, PreviewSize, cancellationToken));
+        await Task.WhenAll(recentHistoryTasks.Values);
 
-    private async Task<List<ResolvedAccount>> ResolveAccountsAcrossRegionsAsync(RiotAccountIdentifier identifier, CancellationToken cancellationToken)
-    {
-        var candidates = new List<ResolvedAccount>();
+        var recentCandidates = GetSharedMatchCandidates(candidatePairs, recentHistoryTasks.ToDictionary(entry => entry.Key, entry => entry.Value.Result));
+        var previewMatches = await FetchMatchItemsAsync(recentCandidates, onProgress, "Checking recent shared matches", null, cancellationToken);
+        var preview = CreateResult(previewMatches);
+        await onPreview(preview);
 
-        foreach (var region in SupportedRegions)
+        var histories = recentHistoryTasks.ToDictionary(entry => entry.Key, entry => entry.Value.Result);
+        var offsets = histories.ToDictionary(entry => entry.Key, entry => entry.Value.Count);
+        var exhausted = histories.Where(entry => entry.Value.Count < PreviewSize).Select(entry => entry.Key).ToHashSet();
+        var processedMatchIds = recentCandidates.Select(candidate => candidate.MatchId).ToHashSet(StringComparer.Ordinal);
+        var allMatches = new System.Collections.Concurrent.ConcurrentDictionary<string, DuoTraceMatchItem>(
+            preview.Matches.ToDictionary(match => match.MatchId, StringComparer.Ordinal),
+            StringComparer.Ordinal);
+
+        onProgress(preview.Matches.Count == 0
+            ? "No shared games in the recent sample yet. Scanning older available match history."
+            : $"Showing {preview.Matches.Count} recent shared {MatchWord(preview.Matches.Count)}. Scanning older available match history.");
+
+        var pageNumber = 0;
+        while (exhausted.Count < accounts.Count)
         {
-            try
+            cancellationToken.ThrowIfCancellationRequested();
+            pageNumber++;
+            var nextPageTasks = accounts
+                .Where(account => !exhausted.Contains(account))
+                .ToDictionary(
+                    account => account,
+                    account => GetMatchIdsAsync(account.Region, account.AccountPuuid, offsets[account], BatchSize, cancellationToken));
+            await Task.WhenAll(nextPageTasks.Values);
+
+            foreach (var (account, pageTask) in nextPageTasks)
             {
-                var account = await GetAccountAsync(region, identifier, cancellationToken);
-                candidates.Add(new ResolvedAccount(region, account.Puuid));
+                var page = pageTask.Result;
+                histories[account].AddRange(page);
+                offsets[account] += page.Count;
+                if (page.Count < BatchSize)
+                {
+                    exhausted.Add(account);
+                }
             }
-            catch (Exception ex)
-            {
-                _logger.LogDebug(ex, "Account lookup failed for region {Region} and Riot ID {Identifier}", region, identifier.Value);
-            }
+
+            var candidates = GetSharedMatchCandidates(candidatePairs, histories)
+                .Where(candidate => processedMatchIds.Add(candidate.MatchId))
+                .ToList();
+            onProgress(candidates.Count == 0
+                ? $"Scanned history batch {pageNumber}; looking for older shared games."
+                : $"Found {candidates.Count} more potential shared {MatchWord(candidates.Count)}. Checking match details.");
+
+            await FetchMatchItemsAsync(
+                candidates,
+                onProgress,
+                "Checking older shared matches",
+                match =>
+                {
+                    allMatches.TryAdd(match.MatchId, match);
+                    onPartialResults(CreateResult(allMatches.Values));
+                },
+                cancellationToken);
         }
 
-        return candidates;
+        onCompleted(CreateResult(allMatches.Values));
+    }
+
+    private async Task<(List<ResolvedAccount> First, List<ResolvedAccount> Second)> ResolveAccountPairsAsync(
+        string region,
+        RiotAccountIdentifier first,
+        RiotAccountIdentifier second,
+        CancellationToken cancellationToken)
+    {
+        if (!string.Equals(region, "all", StringComparison.OrdinalIgnoreCase))
+        {
+            var accounts = await Task.WhenAll(
+                ResolveAccountsForRegionAsync(region, first, cancellationToken),
+                ResolveAccountsForRegionAsync(region, second, cancellationToken));
+            return (accounts[0], accounts[1]);
+        }
+
+        var lookups = SupportedRegions.SelectMany(supportedRegion => new[]
+        {
+            ResolveAccountsForRegionAsync(supportedRegion, first, cancellationToken),
+            ResolveAccountsForRegionAsync(supportedRegion, second, cancellationToken)
+        });
+        var results = await Task.WhenAll(lookups);
+
+        return (
+            results.Where((_, index) => index % 2 == 0).SelectMany(accounts => accounts).ToList(),
+            results.Where((_, index) => index % 2 == 1).SelectMany(accounts => accounts).ToList());
     }
 
     private async Task<List<ResolvedAccount>> ResolveAccountsForRegionAsync(string region, RiotAccountIdentifier identifier, CancellationToken cancellationToken)
     {
-        var account = await GetAccountAsync(region, identifier, cancellationToken);
-        return new List<ResolvedAccount> { new(region, account.Puuid) };
+        try
+        {
+            var account = await GetAccountAsync(region, identifier, cancellationToken);
+            return new List<ResolvedAccount> { new(region, account.Puuid) };
+        }
+        catch (RiotApiException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            _logger.LogDebug("Account lookup found no account in region {Region} for Riot ID {Identifier}", region, identifier.Value);
+            return new List<ResolvedAccount>();
+        }
     }
 
-    private async Task<List<DuoTraceMatchItem>> FindSharedMatchesForPlayersAsync(string firstRegion, string secondRegion, string firstPuuid, string secondPuuid, CancellationToken cancellationToken)
+    private static List<MatchCandidate> GetSharedMatchCandidates(
+        IEnumerable<CandidatePair> candidatePairs,
+        IReadOnlyDictionary<ResolvedAccount, List<string>> histories)
     {
-        var firstIds = await GetAvailableMatchIdsAsync(firstRegion, firstPuuid, cancellationToken);
-        var secondIds = await GetAvailableMatchIdsAsync(secondRegion, secondPuuid, cancellationToken);
-        var secondIdSet = new HashSet<string>(secondIds);
-        var sharedIds = firstIds.Where(id => secondIdSet.Contains(id)).ToList();
+        return candidatePairs
+            .SelectMany(pair =>
+            {
+                var secondIds = histories[pair.Second].ToHashSet(StringComparer.Ordinal);
+                return histories[pair.First]
+                    .Where(secondIds.Contains)
+                    .Select(matchId => new MatchCandidate(matchId, pair.First.Region, pair.First.AccountPuuid, pair.Second.AccountPuuid));
+            })
+            .GroupBy(candidate => candidate.MatchId, StringComparer.Ordinal)
+            .Select(group => group.First())
+            .ToList();
+    }
 
-        var results = new List<DuoTraceMatchItem>();
-        foreach (var matchId in sharedIds)
+    private async Task<List<DuoTraceMatchItem>> FetchMatchItemsAsync(
+        IReadOnlyCollection<MatchCandidate> candidates,
+        Action<string> onProgress,
+        string progressLabel,
+        Action<DuoTraceMatchItem>? onMatchFound,
+        CancellationToken cancellationToken)
+    {
+        if (candidates.Count == 0)
         {
-            var regionForMatch = firstRegion;
-            if (!firstIds.Contains(matchId) && secondIds.Contains(matchId))
-            {
-                regionForMatch = secondRegion;
-            }
+            return new List<DuoTraceMatchItem>();
+        }
 
-            var match = await GetMatchAsync(regionForMatch, matchId, cancellationToken);
-            if (match.Metadata.Participants.Contains(firstPuuid) && match.Metadata.Participants.Contains(secondPuuid))
+        var results = new System.Collections.Concurrent.ConcurrentDictionary<string, DuoTraceMatchItem>(StringComparer.Ordinal);
+        var completed = 0;
+        await Parallel.ForEachAsync(
+            candidates,
+            new ParallelOptions { CancellationToken = cancellationToken, MaxDegreeOfParallelism = MaxConcurrentMatchRequests },
+            async (candidate, token) =>
             {
-                var item = BuildMatchItem(match, firstPuuid, secondPuuid);
-                if (item is not null)
+                var match = await GetMatchAsync(candidate.Region, candidate.MatchId, token);
+                if (match.Metadata.Participants.Contains(candidate.FirstPuuid) && match.Metadata.Participants.Contains(candidate.SecondPuuid))
                 {
-                    results.Add(item);
+                    var item = BuildMatchItem(match, candidate.FirstPuuid, candidate.SecondPuuid);
+                    if (item is not null)
+                    {
+                        results.TryAdd(item.MatchId, item);
+                        onMatchFound?.Invoke(item);
+                    }
                 }
-            }
-        }
 
-        return results;
+                var count = Interlocked.Increment(ref completed);
+                if (count == candidates.Count || count % 10 == 0)
+                {
+                    onProgress($"{progressLabel}: {count} of {candidates.Count}.");
+                }
+            });
+
+        return results.Values.ToList();
     }
 
-    private async Task<List<string>> GetAvailableMatchIdsAsync(string region, string puuid, CancellationToken cancellationToken)
+    private async Task<List<string>> GetMatchIdsAsync(string region, string puuid, int start, int count, CancellationToken cancellationToken)
     {
-        var ids = new List<string>();
-        var start = 0;
-
-        while (true)
-        {
-            var url = $"{GetApiHost(region)}/lol/match/v5/matches/by-puuid/{Uri.EscapeDataString(puuid)}/ids?start={start}&count={BatchSize}";
-            var page = await GetJsonAsync<List<string>>(url, cancellationToken);
-            if (page.Count == 0)
-            {
-                break;
-            }
-
-            ids.AddRange(page);
-            if (page.Count < BatchSize)
-            {
-                break;
-            }
-
-            start += BatchSize;
-        }
-
-        return ids;
+        var url = $"{GetApiHost(region)}/lol/match/v5/matches/by-puuid/{Uri.EscapeDataString(puuid)}/ids?start={start}&count={count}";
+        return await GetJsonAsync<List<string>>(url, cancellationToken);
     }
+
+    private static DuoTraceSearchResult CreateResult(IEnumerable<DuoTraceMatchItem> matches)
+    {
+        var orderedMatches = SortMatches(matches);
+        return new DuoTraceSearchResult
+        {
+            Matches = orderedMatches,
+            Summary = DuoTraceAnalytics.BuildSummary(orderedMatches)
+        };
+    }
+
+    private static string MatchWord(int count) => count == 1 ? "match" : "matches";
 
     private async Task<RiotAccountResponse> GetAccountAsync(string region, RiotAccountIdentifier identifier, CancellationToken cancellationToken)
     {
@@ -201,10 +316,16 @@ public sealed class RiotDuoService : IRiotDuoService
             return await GetJsonAsync<T>(url, cancellationToken);
         }
 
+        if (response.StatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden)
+        {
+            throw new RiotApiException(response.StatusCode,
+                $"Riot API rejected the configured key ({(int)response.StatusCode}). Verify that RIOT_API_KEY is current and available to the running app.");
+        }
+
         if (!response.IsSuccessStatusCode)
         {
             var message = await response.Content.ReadAsStringAsync(cancellationToken);
-            throw new InvalidOperationException($"Riot API request failed ({response.StatusCode}): {message}");
+            throw new RiotApiException(response.StatusCode, $"Riot API request failed ({response.StatusCode}): {message}");
         }
 
         var payload = await response.Content.ReadAsStringAsync(cancellationToken);
@@ -309,6 +430,8 @@ public sealed class RiotDuoService : IRiotDuoService
     }
 
     private sealed record ResolvedAccount(string Region, string AccountPuuid);
+    private sealed record CandidatePair(ResolvedAccount First, ResolvedAccount Second);
+    private sealed record MatchCandidate(string MatchId, string Region, string FirstPuuid, string SecondPuuid);
 
     private sealed record RiotAccountIdentifier(string GameName, string TagLine)
     {

@@ -1,14 +1,15 @@
 # DuoTrace
 
-DuoTrace compares two Riot players, finds the matches they played together, and summarizes how well they perform as a duo. It supports patch and month filtering so you can check performance across a specific patch or time window.
+DuoTrace compares two Riot IDs, finds the matches they shared, and summarizes how often they played on the same team. Patch and month analysis belongs in the separate duo-insights experience, not the player comparison search.
 
 ## What it does
 
 - compares two Riot IDs in the form `GameName#TAG`
 - resolves accounts across supported Riot regions
 - fetches shared match history
-- filters results by patch and month
-- calculates a summary of wins, losses, queue mix, and common patch history
+- supports Riot Match API routing clusters: Americas, Europe, Asia, and Southeast Asia
+- summarizes shared matches, same-team games, same-team win rate, and most-played queue
+- shows a recent-match preview while the full available match history is scanned in the background
 
 ## Project structure
 
@@ -29,12 +30,13 @@ DuoTrace compares two Riot players, finds the matches they played together, and 
 
 ```powershell
 cd C:\Users\leseg\projects\DuoTraceApp
-$env:RIOT_API_KEY = "your_key_here"
+$env:RIOT_API_KEY = "your_current_riot_api_key"
 dotnet restore
 dotnet run --urls http://localhost:5000
 ```
 
 Then open `http://localhost:5000` in the browser.
+The environment variable takes precedence over application settings. Restart the app after setting or changing the key. Never commit API keys to application settings or source control.
 
 ### Run tests
 
@@ -53,5 +55,6 @@ This repo includes:
 ## Notes
 
 - Riot API responses can be limited by rate limits and historical data availability
-- shared match history depends on the data returned by Riot for the selected players
+- shared match history depends on the data returned by Riot for the selected players and routing cluster
+- Riot API rate limits and the size of both match histories affect how long the final scan takes; recent shared matches appear first, with older matches added as they are checked
 - the app is intentionally scoped to a focused duo-analysis workflow rather than a broader analytics platform

@@ -5,8 +5,6 @@ public class DuoTraceSearchRequest
     public string FirstPlayer { get; set; } = string.Empty;
     public string SecondPlayer { get; set; } = string.Empty;
     public string Region { get; set; } = "all";
-    public string? Patch { get; set; }
-    public string? Month { get; set; }
 }
 
 public class DuoTraceMatchItem
@@ -57,11 +55,9 @@ public class DuoTraceParticipant
 public class DuoTraceSummary
 {
     public int Games { get; set; }
+    public int SameTeamGames { get; set; }
     public double DuoWinRate { get; set; }
     public string BestQueue { get; set; } = "—";
-    public double SameTeamWinRate { get; set; }
-    public string TopPatch { get; set; } = "—";
-    public string TopDuoPair { get; set; } = "—";
 }
 
 public class DuoTraceViewModel

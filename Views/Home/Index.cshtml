@@ -6,35 +6,44 @@
 <div class="duotrace-shell">
     <section class="hero-card">
         <nav class="topbar">
-            <div class="brand">
-                <span class="brand-mark">D</span>
-                <span>DuoTrace</span>
-            </div>
-            <span class="live-badge">Riot match history</span>
+            <a class="brand" asp-controller="Home" asp-action="Index" aria-label="Duo Trace home">
+                <span class="brand-wordmark" aria-hidden="true">
+                    <span>Du</span>
+                    <span class="brand-mark">
+                        <svg viewBox="0 0 24 24" fill="none">
+                            <path d="M20.4 8.9c0 4.2-8.4 10-8.4 10S3.6 13.1 3.6 8.9A4.5 4.5 0 0 1 12 6.7a4.5 4.5 0 0 1 8.4 2.2Z" />
+                        </svg>
+                    </span>
+                    <span> Trace</span>
+                </span>
+            </a>
+            <span class="live-badge"><span aria-hidden="true"></span> Riot match history</span>
         </nav>
 
         <div class="hero-grid">
             <div>
-                <span class="eyebrow">League of Legends duo finder</span>
-                <h1>Find games two Riot IDs shared.</h1>
+                <span class="eyebrow">League of Legends · Duo search</span>
+                <h1>See which games you shared.</h1>
                 <p>
-                    Compare two players, scan the matches Riot exposes, and narrow the results by patch, month, or server.
+                    Compare two Riot IDs to find shared matches, how often you were on the same team, and how those games went.
                 </p>
             </div>
             <aside class="summary-aside">
-                <span>Scan mode</span>
-                <strong>Full available history</strong>
-                <small>Routing: @(Model.Search.Region == "all" ? "All servers" : Model.Search.Region)</small>
+                <span class="summary-kicker">Match history</span>
+                <strong>Shared games,<br />straight from Riot.</strong>
+                <small id="routing-summary">Routing: @(Model.Search.Region == "all" ? "All regions" : Model.Search.Region)</small>
             </aside>
         </div>
     </section>
 
     <section class="lookup-panel">
-        <form asp-action="Index" method="post" class="lookup-form">
+        <form asp-action="Index" method="post" class="lookup-form"
+              data-start-url="@Url.Action("StartSearch")"
+              data-status-url="@Url.Action("SearchStatus")">
             @Html.AntiForgeryToken()
             <div class="lookup-heading">
                 <div>
-                    <span class="eyebrow">Start a comparison</span>
+                    <span class="eyebrow">Player comparison</span>
                     <h2>Choose two players</h2>
                 </div>
                 <p>Use Riot IDs in the format <strong>GameName#TAG</strong>.</p>
@@ -42,34 +51,24 @@
 
             <div class="form-grid">
                 <label>
-                    <span><b>01</b> First Riot ID</span>
+                    <span>First Riot ID</span>
                     <input asp-for="Search.FirstPlayer" autocomplete="off" spellcheck="false" placeholder="GameName#TAG" />
                 </label>
 
                 <label>
-                    <span><b>02</b> Second Riot ID</span>
+                    <span>Second Riot ID</span>
                     <input asp-for="Search.SecondPlayer" autocomplete="off" spellcheck="false" placeholder="SecondName#TAG" />
                 </label>
 
                 <label>
-                    <span><b>03</b> Routing region</span>
+                    <span>Match routing region</span>
                     <select asp-for="Search.Region">
-                        <option value="all">All servers</option>
-                        <option value="americas">Americas</option>
-                        <option value="europe">Europe</option>
-                        <option value="asia">Asia</option>
-                        <option value="sea">SEA</option>
+                        <option value="all">All regions</option>
+                        <option value="americas">Americas (NA, BR, LATAM)</option>
+                        <option value="europe">Europe (EUW, EUNE, TR, RU)</option>
+                        <option value="asia">Asia (KR, JP)</option>
+                        <option value="sea">Southeast Asia (OCE, SEA)</option>
                     </select>
-                </label>
-
-                <label>
-                    <span><b>04</b> Patch</span>
-                    <input asp-for="Search.Patch" autocomplete="off" spellcheck="false" placeholder="14.10" />
-                </label>
-
-                <label>
-                    <span><b>05</b> Month</span>
-                    <input asp-for="Search.Month" type="month" />
                 </label>
             </div>
 
@@ -79,6 +78,11 @@
             </div>
         </form>
     </section>
+
+    <div class="search-status is-hidden" id="search-status" role="status" aria-live="polite">
+        <span class="search-status-indicator" aria-hidden="true"></span>
+        <span id="search-status-message"></span>
+    </div>
 
     <aside class="limitations-panel">
         <strong>Data limits</strong>
@@ -92,47 +96,35 @@
         <div class="message-bar">@Model.Message</div>
     }
 
-    @if (Model.Summary is not null && Model.HasResults)
-    {
-        <section class="duo-summary" aria-live="polite">
+    <section class="duo-summary @(Model.Summary is not null && Model.HasResults ? string.Empty : "is-hidden")" id="duo-summary" aria-live="polite">
             <div class="duo-summary-header">
                 <div>
                     <span class="eyebrow">Duo analysis</span>
-                    <h2>Best duo stats</h2>
+                    <h2>Shared-game summary</h2>
                 </div>
             </div>
-            <div class="duo-summary-grid">
+            <div class="duo-summary-grid" id="duo-summary-grid">
+                @if (Model.Summary is not null && Model.HasResults)
+                {
                 <article class="summary-metric-card">
-                    <span>Games</span>
+                    <span>Shared games</span>
                     <strong>@Model.Summary.Games</strong>
                 </article>
                 <article class="summary-metric-card">
+                    <span>Duo games</span>
+                    <strong>@Model.Summary.SameTeamGames</strong>
+                </article>
+                <article class="summary-metric-card">
                     <span>Duo win rate</span>
-                    <strong>@((Model.Summary.DuoWinRate * 100).ToString("0%"))</strong>
+                    <strong>@Model.Summary.DuoWinRate.ToString("0%")</strong>
                 </article>
-                <article class="summary-metric-card">
-                    <span>Best queue</span>
-                    <strong>@Model.Summary.BestQueue</strong>
-                </article>
-                <article class="summary-metric-card">
-                    <span>Same-team win rate</span>
-                    <strong>@((Model.Summary.SameTeamWinRate * 100).ToString("0%"))</strong>
-                </article>
-                <article class="summary-metric-card">
-                    <span>Top patch</span>
-                    <strong>@Model.Summary.TopPatch</strong>
-                </article>
-                <article class="summary-metric-card">
-                    <span>Top duo pair</span>
-                    <strong>@Model.Summary.TopDuoPair</strong>
-                </article>
+                }
             </div>
         </section>
-    }
 
-    @if (Model.HasResults)
-    {
-        <section class="results" aria-live="polite">
+    <section class="results @(Model.HasResults ? string.Empty : "is-hidden")" id="match-results" aria-live="polite">
+            @if (Model.HasResults)
+            {
             @foreach (var match in Model.Matches)
             {
                 <article class="match-card">
@@ -184,6 +176,6 @@
                     }
                 </article>
             }
+            }
         </section>
-    }
 </div>

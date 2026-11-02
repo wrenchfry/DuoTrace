@@ -8,10 +8,34 @@ namespace DuoTraceApp.Controllers;
 public class HomeController : Controller
 {
     private readonly IRiotDuoService _riotDuoService;
+    private readonly DuoTraceSearchCoordinator _searchCoordinator;
 
-    public HomeController(IRiotDuoService riotDuoService)
+    public HomeController(IRiotDuoService riotDuoService, DuoTraceSearchCoordinator searchCoordinator)
     {
         _riotDuoService = riotDuoService;
+        _searchCoordinator = searchCoordinator;
+    }
+
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> StartSearch(DuoTraceViewModel model)
+    {
+        if (model.Search is null
+            || string.IsNullOrWhiteSpace(model.Search.FirstPlayer)
+            || string.IsNullOrWhiteSpace(model.Search.SecondPlayer))
+        {
+            return BadRequest(new { message = "Enter two Riot IDs in the format GameName#TAG." });
+        }
+
+        var status = await _searchCoordinator.StartAsync(model.Search);
+        return Json(status);
+    }
+
+    [HttpGet]
+    public IActionResult SearchStatus(string id)
+    {
+        var status = _searchCoordinator.GetStatus(id);
+        return status is null ? NotFound() : Json(status);
     }
 
     [HttpGet]
@@ -46,7 +70,7 @@ public class HomeController : Controller
 
             if (model.Matches.Count == 0)
             {
-                model.Message = "No shared matches match the current filters. Try all servers, a wider month, or remove the patch filter.";
+                model.Message = "No shared matches were found in Riot's available match history. Check both Riot IDs and the routing region.";
             }
             else
             {
