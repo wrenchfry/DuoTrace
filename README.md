@@ -4,14 +4,14 @@ DuoTrace is a small ASP.NET Core app built to answer one practical question: how
 
 ## Why this project exists
 
-This project is focused on a single use case and keeps the scope realistic:
+This project is built around a single, practical workflow:
 
 - compare two Riot IDs
 - find shared games and match history
 - filter by patch, month, and region
-- surface a simple duo summary without overbuilding the app
+- surface a concise duo summary for quick review
 
-That keeps the project easy to understand, easier to maintain, and more credible as a portfolio piece.
+The scope stays focused so the project remains easy to understand, maintain, and explain.
 
 ## Architecture
 
@@ -38,7 +38,7 @@ The app is intentionally simple and layered:
 - paid infrastructure
 - speculative features unrelated to the main workflow
 
-This is a deliberate choice to keep the app clear, useful, and easy to explain in a technical interview.
+This keeps the application clear, maintainable, and aligned with the product’s real use case.
 
 ## Free-tier setup
 
@@ -88,4 +88,4 @@ This is not a full production stack, but it is ready for a simple free-tier depl
 
 ## Recommended next step
 
-If you want to keep building from a portfolio angle, the next improvement is to add a cleaner results view or a small saved-history feature, rather than expanding the project into a large analytics suite.
+The next improvement is a clearer result presentation layer or a lightweight saved-history flow, depending on how much product polish is needed.
