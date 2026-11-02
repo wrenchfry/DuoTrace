@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="DuoTraceApp.Tests/**" />
+    <Compile Remove="DuoTraceInsights/**" />
+    <Content Remove="DuoTraceApp.Tests/**" />
+    <Content Remove="DuoTraceInsights/**" />
+    <EmbeddedResource Remove="DuoTraceApp.Tests/**" />
+    <EmbeddedResource Remove="DuoTraceInsights/**" />
+    <None Remove="DuoTraceApp.Tests/**" />
+    <None Remove="DuoTraceInsights/**" />
+  </ItemGroup>
+
+</Project>

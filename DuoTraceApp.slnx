@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="DuoTraceApp.csproj" />
+  <Project Path="DuoTraceApp.Tests/DuoTraceApp.Tests.csproj" />
+  <Project Path="DuoTraceInsights/DuoTraceInsights.csproj" />
+</Solution>

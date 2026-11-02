@@ -1,0 +1,11 @@
+bin/
+obj/
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.dbmdl
+appsettings.Development.json
+.env
+.env.*
