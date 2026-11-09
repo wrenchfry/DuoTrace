@@ -1,0 +1,9 @@
+.git
+.vs
+.idea
+**/bin
+**/obj
+.env
+.env.*
+appsettings.Development.json
+DuoTraceApp.Tests/
