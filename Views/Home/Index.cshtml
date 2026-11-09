@@ -1,0 +1,181 @@
+﻿@model DuoTraceApp.Models.DuoTraceViewModel
+@{
+    ViewData["Title"] = "DuoTrace";
+}
+
+<div class="duotrace-shell">
+    <section class="hero-card">
+        <nav class="topbar">
+            <a class="brand" asp-controller="Home" asp-action="Index" aria-label="Duo Trace home">
+                <span class="brand-wordmark" aria-hidden="true">
+                    <span>Du</span>
+                    <span class="brand-mark">
+                        <svg viewBox="0 0 24 24" fill="none">
+                            <path d="M20.4 8.9c0 4.2-8.4 10-8.4 10S3.6 13.1 3.6 8.9A4.5 4.5 0 0 1 12 6.7a4.5 4.5 0 0 1 8.4 2.2Z" />
+                        </svg>
+                    </span>
+                    <span> Trace</span>
+                </span>
+            </a>
+            <span class="live-badge"><span aria-hidden="true"></span> Riot match history</span>
+        </nav>
+
+        <div class="hero-grid">
+            <div>
+                <span class="eyebrow">League of Legends · Duo search</span>
+                <h1>See which games you shared.</h1>
+                <p>
+                    Compare two Riot IDs to find shared matches, how often you were on the same team, and how those games went.
+                </p>
+            </div>
+            <aside class="summary-aside">
+                <span class="summary-kicker">Match history</span>
+                <strong>Shared games,<br />straight from Riot.</strong>
+                <small id="routing-summary">Routing: @(Model.Search.Region == "all" ? "All regions" : Model.Search.Region)</small>
+            </aside>
+        </div>
+    </section>
+
+    <section class="lookup-panel">
+        <form asp-action="Index" method="post" class="lookup-form"
+              data-start-url="@Url.Action("StartSearch")"
+              data-status-url="@Url.Action("SearchStatus")">
+            @Html.AntiForgeryToken()
+            <div class="lookup-heading">
+                <div>
+                    <span class="eyebrow">Player comparison</span>
+                    <h2>Choose two players</h2>
+                </div>
+                <p>Use Riot IDs in the format <strong>GameName#TAG</strong>.</p>
+            </div>
+
+            <div class="form-grid">
+                <label>
+                    <span>First Riot ID</span>
+                    <input asp-for="Search.FirstPlayer" autocomplete="off" spellcheck="false" placeholder="GameName#TAG" />
+                </label>
+
+                <label>
+                    <span>Second Riot ID</span>
+                    <input asp-for="Search.SecondPlayer" autocomplete="off" spellcheck="false" placeholder="SecondName#TAG" />
+                </label>
+
+                <label>
+                    <span>Match routing region</span>
+                    <select asp-for="Search.Region">
+                        <option value="all">All regions</option>
+                        <option value="americas">Americas (NA, BR, LATAM)</option>
+                        <option value="europe">Europe (EUW, EUNE, TR, RU)</option>
+                        <option value="asia">Asia (KR, JP)</option>
+                        <option value="sea">Southeast Asia (OCE, SEA)</option>
+                    </select>
+                </label>
+            </div>
+
+            <div class="actions">
+                <button type="submit">Check shared games</button>
+                <a asp-action="Index" class="secondary-link">Clear results</a>
+            </div>
+        </form>
+    </section>
+
+    <div class="search-status is-hidden" id="search-status" role="status" aria-live="polite">
+        <span class="search-status-indicator" aria-hidden="true"></span>
+        <span id="search-status-message"></span>
+    </div>
+
+    <aside class="limitations-panel">
+        <strong>Data limits</strong>
+        <p>
+            DuoTrace only sees games Riot still exposes in its match history. Older games can disappear, and active players may only have recent matches available.
+        </p>
+    </aside>
+
+    @if (Model.Message is not null)
+    {
+        <div class="message-bar">@Model.Message</div>
+    }
+
+    <section class="duo-summary @(Model.Summary is not null && Model.HasResults ? string.Empty : "is-hidden")" id="duo-summary" aria-live="polite">
+            <div class="duo-summary-header">
+                <div>
+                    <span class="eyebrow">Duo analysis</span>
+                    <h2>Shared-game summary</h2>
+                </div>
+            </div>
+            <div class="duo-summary-grid" id="duo-summary-grid">
+                @if (Model.Summary is not null && Model.HasResults)
+                {
+                <article class="summary-metric-card">
+                    <span>Shared games</span>
+                    <strong>@Model.Summary.Games</strong>
+                </article>
+                <article class="summary-metric-card">
+                    <span>Duo games</span>
+                    <strong>@Model.Summary.SameTeamGames</strong>
+                </article>
+                <article class="summary-metric-card">
+                    <span>Duo win rate</span>
+                    <strong>@Model.Summary.DuoWinRate.ToString("0%")</strong>
+                </article>
+                }
+            </div>
+        </section>
+
+    <section class="results @(Model.HasResults ? string.Empty : "is-hidden")" id="match-results" aria-live="polite">
+            @if (Model.HasResults)
+            {
+            @foreach (var match in Model.Matches)
+            {
+                <article class="match-card">
+                    <div class="match-heading">
+                        <div>
+                            <span class="match-date">@match.StartedAt.ToString("MMM d, yyyy")</span>
+                            <h3>@match.Queue</h3>
+                        </div>
+                        <span class="team-chip">@(match.SameTeam ? "Same team" : "Opposite teams")</span>
+                    </div>
+
+                    <div class="players">
+                        <div class="player-card @(match.FirstPlayer.Win ? "winner" : string.Empty)">
+                            <span>@match.FirstPlayer.Name</span>
+                            <strong>@match.FirstPlayer.Champion</strong>
+                            <small>@match.FirstPlayer.Kda - @(match.FirstPlayer.Win ? "Win" : "Loss")</small>
+                        </div>
+                        <div class="player-card @(match.SecondPlayer.Win ? "winner" : string.Empty)">
+                            <span>@match.SecondPlayer.Name</span>
+                            <strong>@match.SecondPlayer.Champion</strong>
+                            <small>@match.SecondPlayer.Kda - @(match.SecondPlayer.Win ? "Win" : "Loss")</small>
+                        </div>
+                    </div>
+
+                    <dl class="meta-grid">
+                        <div>
+                            <dt>Duration</dt>
+                            <dd>@match.Duration</dd>
+                        </div>
+                        <div>
+                            <dt>Mode</dt>
+                            <dd>@match.GameMode</dd>
+                        </div>
+                        <div>
+                            <dt>Patch</dt>
+                            <dd>@match.Patch</dd>
+                        </div>
+                        <div>
+                            <dt>Match ID</dt>
+                            <dd>@match.MatchId</dd>
+                        </div>
+                    </dl>
+
+                    @if (!string.IsNullOrWhiteSpace(match.MatchUrl))
+                    {
+                        <div class="match-actions">
+                            <a href="@match.MatchUrl" target="_blank" rel="noreferrer">Open match page</a>
+                        </div>
+                    }
+                </article>
+            }
+            }
+        </section>
+</div>
