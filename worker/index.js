@@ -7,14 +7,6 @@ export default {
     try {
       const url = new URL(request.url);
 
-      if (url.pathname === '/api/analytics/searches') {
-        return await handleAnalyticsSearch(request, env);
-      }
-
-      if (url.pathname === '/api/analytics/export') {
-        return await handleAnalyticsExport(request, env, url);
-      }
-
       if (url.pathname === '/api/account') {
         return await handleAccount(request, env);
       }
@@ -80,119 +72,6 @@ async function handleMatch(request, env) {
   await writeCachedMatch(input.region, match);
 
   return jsonResponse(match);
-}
-
-async function handleAnalyticsSearch(request, env) {
-  if (request.method !== 'POST') {
-    throw new Response(JSON.stringify({ message: 'Method not allowed.' }), {
-      status: 405,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
-
-  const input = await readJsonRequest(request);
-  const first = validateRiotId(input.first);
-  const second = validateRiotId(input.second);
-
-  if (!regions.has(input.region)) {
-    throw new Response(JSON.stringify({ message: 'Choose a valid routing region.' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
-
-  if (!Array.isArray(input.matches)) {
-    throw new Response(JSON.stringify({ message: 'Search matches must be an array.' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
-
-  if (!env.ANALYTICS_DB) {
-    return jsonResponse({ recorded: false }, 202);
-  }
-
-  const searchId = crypto.randomUUID();
-  const searchedAt = new Date().toISOString();
-
-  await env.ANALYTICS_DB.prepare(`
-    INSERT INTO analytics_searches (
-      search_id,
-      first_game_name,
-      first_tag_line,
-      second_game_name,
-      second_tag_line,
-      region,
-      searched_at,
-      shared_match_count,
-      matches_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).bind(
-    searchId,
-    first.gameName,
-    first.tagLine,
-    second.gameName,
-    second.tagLine,
-    input.region,
-    searchedAt,
-    input.matches.length,
-    JSON.stringify(input.matches)
-  ).run();
-
-  return jsonResponse({ recorded: true, searchId }, 202);
-}
-
-async function handleAnalyticsExport(request, env, url) {
-  if (request.method !== 'GET') {
-    throw new Response(JSON.stringify({ message: 'Method not allowed.' }), {
-      status: 405,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
-
-  if (!env.ANALYTICS_DB || !env.ANALYTICS_EXPORT_TOKEN) {
-    throw new Response(JSON.stringify({ message: 'Analytics export is not configured.' }), {
-      status: 503,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
-
-  const token = request.headers.get('Authorization');
-  if (token !== `Bearer ${env.ANALYTICS_EXPORT_TOKEN}`) {
-    throw new Response(JSON.stringify({ message: 'Unauthorized.' }), {
-      status: 401,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
-
-  const cursor = validateCursor(url.searchParams.get('after'));
-  const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 100, 1), 500);
-  const result = await env.ANALYTICS_DB.prepare(`
-    SELECT sequence, search_id, first_game_name, first_tag_line, second_game_name, second_tag_line,
-      region, searched_at, shared_match_count, matches_json
-    FROM analytics_searches
-    WHERE sequence > ?
-    ORDER BY sequence ASC
-    LIMIT ?
-  `).bind(cursor, limit + 1).all();
-  const rows = result.results || [];
-  const hasMore = rows.length > limit;
-  const records = rows.slice(0, limit).map((row) => ({
-    sequence: row.sequence,
-    searchId: row.search_id,
-    first: { gameName: row.first_game_name, tagLine: row.first_tag_line },
-    second: { gameName: row.second_game_name, tagLine: row.second_tag_line },
-    region: row.region,
-    searchedAt: row.searched_at,
-    sharedMatchCount: row.shared_match_count,
-    matches: JSON.parse(row.matches_json)
-  }));
-
-  return jsonResponse({
-    records,
-    nextCursor: records.length ? records[records.length - 1].sequence : cursor,
-    hasMore
-  });
 }
 
 async function readRequest(request, env) {
@@ -277,7 +156,7 @@ function rateLimitResponse(response) {
   });
 }
 
-function validateRiotId(value) {
+export function validateRiotId(value) {
   if (!value || typeof value !== 'object') {
     throw new Response(JSON.stringify({ message: 'Use Riot ID format GameName#TAG for both players.' }), {
       status: 400,
@@ -298,7 +177,7 @@ function validateRiotId(value) {
   return { gameName, tagLine };
 }
 
-function validateString(value, message) {
+export function validateString(value, message) {
   const normalized = String(value || '').trim();
 
   if (!normalized) {
@@ -311,7 +190,7 @@ function validateString(value, message) {
   return normalized;
 }
 
-function validateStart(value) {
+export function validateStart(value) {
   const start = Number(value);
 
   if (!Number.isInteger(start) || start < 0) {
@@ -324,20 +203,7 @@ function validateStart(value) {
   return start;
 }
 
-function validateCursor(value) {
-  const cursor = Number(value || 0);
-
-  if (!Number.isInteger(cursor) || cursor < 0) {
-    throw new Response(JSON.stringify({ message: 'Invalid analytics cursor.' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
-
-  return cursor;
-}
-
-function normalizeMatch(match) {
+export function normalizeMatch(match) {
   return {
     metadata: {
       matchId: match.metadata.matchId,
